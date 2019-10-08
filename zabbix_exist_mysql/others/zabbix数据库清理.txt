@@ -1,0 +1,176 @@
+今天我们的zabbix-server机器根空间不够了，我一步步排查结果发现是/var/lib/mysql/下的libdata1文件过大，已经达到了41G。我立即想到了zabbix的数据库原因，随后百度、谷歌才知道zabbix的数据库他的表模式是共享表空间模式，随着数据增长，ibdata1 越来越大，性能方面会有影响，而且innodb把数据和索引都放在ibdata1下。
+
+共享表空间模式：
+
+InnoDB 默认会将所有的数据库InnoDB引擎的表数据存储在一个共享空间中：ibdata1，这样就感觉不爽，增删数据库的时候，ibdata1文件不会自动收缩，单个数据库的备份也将成为问题。通常只能将数据使用mysqldump 导出，然后再导入解决这个问题。
+
+独立表空间模式：
+
+优点： 
+1.每个表都有自已独立的表空间。 
+2.每个表的数据和索引都会存在自已的表空间中。 
+3.可以实现单表在不同的数据库中移动。 
+4.空间可以回收（drop/truncate table方式操作表空间不能自动回收） 
+5.对于使用独立表空间的表，不管怎么删除，表空间的碎片不会太严重的影响性能，而且还有机会处理。 
+缺点： 
+单表增加比共享空间方式更大。
+
+结论： 
+共享表空间在Insert操作上有一些优势，但在其它都没独立表空间表现好，所以我们要改成独立表空间。 
+当启用独立表空间时，请合理调整一下 innodb_open_files 参数。
+
+下面我们来讲下如何讲zabbix数据库修改成独立表空间模式
+
+1.查看文件大小
+
+[root@localhost ~]#cd /var/lib/mysql
+
+[root@localhost ~]#ls -lh
+
+-rw-rw---- 1 mysql mysql 41G Nov 24 13:31 ibdata1
+
+-rw-rw---- 1 mysql mysql 5.0M Nov 24 13:31 ib_logfile0
+
+-rw-rw---- 1 mysql mysql 5.0M Nov 24 13:31 ib_logfile1
+
+drwx------ 2 mysql mysql 1.8M Nov 24 13:31 zabbix
+
+大家可以看到这是没修改之前的共享表数据空间文件ibdata1大小已经达到了41G
+
+2.清除zabbix数据库历史数据
+
+1)查看哪些表的历史数据比较多
+
+[root@localhost ~]#mysql -uroot -p
+
+mysql > select table_name, (data_length+index_length)/1024/1024 as total_mb, table_rows from information_schema.tables where table_schema='zabbix';
+
+ 
+
++-----------------------+---------------+------------+
+
+| table_name            | total_mb      | table_rows |
+
++-----------------------+---------------+------------+
+
+| acknowledges          |    0.06250000 |          0 |
+
+....
+
+| help_items            |    0.04687500 |        103 |
+
+| history              | 1020.00000000 |  123981681 |
+
+| history_log          |    0.04687500 |          0 |
+
+...
+
+| history_text          |    0.04687500 |          0 |
+
+| history_uint          | 3400.98437500 |  34000562 |
+
+| history_uint_sync    |    0.04687500 |          0 |
+
+可以看到history和history_uint这两个表的历史数据最多。
+
+另外就是trends,trends_uint中也存在一些数据。
+
+由于数据量太大，按照普通的方式delete数据的话基本上不太可能。
+
+所以决定直接采用truncate table的方式来快速清空这些表的数据，再使用mysqldump导出数据，删除共享表空间数据文件，重新导入数据。
+
+2）停止相关服务，避免写入数据
+
+[root@localhost ~]#/etc/init.d/zabbix_server stop
+
+[root@localhost ~]#/etc/init.d/httpd stop
+
+3）清空历史数据
+
+[root@localhost ~]#mysql -uroot -p
+
+mysql > use zabbix;
+
+Database changed
+
+ 
+
+mysql > truncate table history;
+
+Query OK, 123981681 rows affected (0.23 sec)
+
+ 
+
+mysql > optimize table history;
+
+1 row in set (0.02 sec)
+
+ 
+
+mysql > truncate table history_uint;
+
+Query OK, 57990562 rows affected (0.12 sec)
+
+mysql > optimize table history_uint;
+
+1 row in set (0.03 sec)
+
+3.备份数据库由于我/下的空间不足所以我挂载了一个NFS过来
+
+[root@localhost ~]#mysqldump -uroot -p zabbix > /data/zabbix.sql
+
+4.停止数据库并删除共享表空间数据文件
+
+1)停止数据库
+
+[root@localhost ~]#/etc/init.d/mysqld stop
+
+2）删除共享表空间数据文件
+
+[root@localhost ~]#cd /var/lib/mysql
+
+[root@localhost ~]#rm -rf ib*
+
+
+5.增加innodb_file_per_table参数
+
+[root@localhost ~]#vi /etc/my.cnf
+
+在[mysqld]下设置
+
+innodb_file_per_table=1
+
+6.启动mysql
+
+[root@localhost ~]#/etc/init.d/mysqld start
+
+7.查看innodb_file_per_table参数是否生效
+
+[root@localhost ~]#mysql -uroot -p
+
+mysql> show variables like '%per_table%';
+
++-----------------------+-------+
+
+| Variable_name | Value |
+
++-----------------------+-------+
+
+| innodb_file_per_table | ON |
+
++-----------------------+-------+
+
+1 row in set (0.00 sec)
+
+
+8.重新导入数据库
+
+[root@localhost ~]#mysqldump -uroot -p zabbix < /data/zabbix.sql
+
+9.最后，恢复相关服务进程
+
+[root@localhost ~]#/etc/init.d/zabbix_server start
+
+[root@localhost ~]#/etc/init.d/httpd start
+
+恢复完服务之后，查看/分区的容量就下去了，之前是99%，处理完之后变成了12%。可见其成效

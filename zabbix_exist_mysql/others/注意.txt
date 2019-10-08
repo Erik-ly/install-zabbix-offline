@@ -1,0 +1,9 @@
+创建zabbix账号
+user add zabbix
+创建zabbix属组
+groupadd zabbix
+修改/var/log下zabbix目录权限为zabbix:zabbix
+修改/var/run下zabbix目录权限为zabbix:zabbix
+lsattr /etc/group
+chattr -i /etc/group
+监控项后面有个进程可以设置成8倍率每秒变更

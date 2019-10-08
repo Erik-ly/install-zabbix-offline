@@ -1,0 +1,3 @@
+#更改zabbix图形单位
+vi /usr/share/zabbix/include/func.inc.php
+$blackList = ['%', 'ms', 'rpm', 'RPM'];

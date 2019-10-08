@@ -1,0 +1,6 @@
+SELECT TABLE_NAME,
+CONCAT(TRUNCATE(data_length/1024/1024,2),'MB') AS data_size,
+CONCAT(TRUNCATE(index_length/1024/1024,2),'MB') AS index_size
+FROM information_schema.tables WHERE TABLE_SCHEMA = 'zabbix'
+GROUP BY TABLE_NAME
+ORDER BY data_length DESC;
